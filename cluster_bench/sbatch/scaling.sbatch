@@ -1,0 +1,101 @@
+#!/bin/bash
+#SBATCH --job-name=cb_scaling
+#SBATCH --partition=kempner_dev
+#SBATCH --account=kempner_dev
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:4
+#SBATCH --mem=256G
+#SBATCH --time=01:30:00
+#SBATCH --output=logs/%x.%j.out
+#SBATCH --error=logs/%x.%j.err
+
+# World-size scaling curve for a fixed model (Qwen2.5-7B FSDP2). Runs one
+# benchmark per (nnodes, nproc-per-node) point inside the allocation.
+#
+# Points covered by default:
+#   1×1 (single GPU)          - compute floor (first allocated node)
+#   1×4 (single node, 4 GPU)  - NVLink / NVSwitch path (first allocated node)
+#   2×4 (two nodes, 8 GPU)    - IB/RoCE cross-node path
+#
+# Output: $RESULTS_ROOT/cluster_bench/scaling/<ts>/n<N>_g<G>_w<W>/
+#         contains benchmark_results.json + stdout.log per point.
+#
+# Submit with sufficient allocation: `sbatch --nodes=2 sbatch/scaling.sbatch`.
+# Increase --nodes if you want more points (edit POINTS to cover them).
+
+set -euo pipefail
+mkdir -p logs
+
+CLUSTER_BENCH_ROOT="${CLUSTER_BENCH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${CLUSTER_BENCH_ROOT}/shared/slurm_common.sh"
+
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT_DIR="${RESULTS_ROOT}/cluster_bench/scaling/${TS}"
+mkdir -p "${OUT_DIR}"
+
+CONFIG="${CLUSTER_BENCH_ROOT}/configs/network_scaling.yaml"
+
+# One-node scaling points route through the CLI wrapper (it handles local torchrun).
+# Multi-node points route through a direct srun+torchrun path because the CLI
+# wrapper doesn't pass SLURM-level rank info through — torchrun with c10d rdzv
+# handles rank assignment on its own.
+POINTS=(
+    "1 1"
+    "1 4"
+    "2 4"
+)
+
+for p in "${POINTS[@]}"; do
+    read -r nn npg <<< "$p"
+    if (( nn > NNODES )); then
+        echo "[scaling] skip ${nn}x${npg} — job only has ${NNODES} node(s)"
+        continue
+    fi
+    world=$((nn * npg))
+    point_dir="${OUT_DIR}/n${nn}_g${npg}_w${world}"
+    mkdir -p "${point_dir}"
+    echo
+    echo "=== [scaling] nnodes=${nn} nproc/node=${npg} world=${world} ==="
+
+    if (( nn == 1 )); then
+        # Single-node: let the CLI launcher handle local torchrun.
+        # Pin to one allocation slot via srun --nodes=1 --relative=0 so the
+        # point always runs on the first allocated node (deterministic).
+        srun --nodes=1 --ntasks=1 --ntasks-per-node=1 --cpus-per-task=8 --gres=gpu:${npg} \
+             --relative=0 \
+            "${CLUSTER_BENCH_ROOT}/shared/launch.sh" automodel -c "${CONFIG}" benchmark llm \
+                --benchmark.json_output_path="${point_dir}/benchmark_results.json" \
+                --benchmark.num_nodes=${nn} \
+                --nproc-per-node=${npg} \
+            > "${point_dir}/stdout.log" 2>&1 || echo "[scaling] point ${nn}x${npg} failed"
+    else
+        # Multi-node: srun spawns one task per node; inside each, torchrun with
+        # c10d rendezvous elects node ranks automatically.  We deliberately do
+        # NOT pass --node-rank (that's for static rdzv and conflicts with c10d).
+        srun --nodes=${nn} --ntasks-per-node=1 --cpus-per-task=8 --gres=gpu:${npg} \
+            "${CLUSTER_BENCH_ROOT}/shared/launch.sh" \
+                torchrun \
+                    --nnodes=${nn} \
+                    --nproc-per-node=${npg} \
+                    --rdzv-backend=c10d \
+                    --rdzv-endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+                    /opt/Automodel/nemo_automodel/recipes/llm/benchmark.py \
+                    --config "${CONFIG}" \
+                    --benchmark.json_output_path="${point_dir}/benchmark_results.json" \
+                    --benchmark.num_nodes=${nn} \
+            > "${point_dir}/stdout.log" 2>&1 || echo "[scaling] point ${nn}x${npg} failed"
+    fi
+
+    if [[ -f "${point_dir}/benchmark_results.json" ]]; then
+        "${CLUSTER_BENCH_ROOT}/shared/launch.sh" python -c "
+import json, sys
+d = json.load(open('${point_dir}/benchmark_results.json'))
+print('[scaling] world=${world} MFU=%.2f%% tflops=%.1f iter=%.3fs' % (
+    d.get('avg_mfu_percent', 0), d.get('tflops_per_gpu', 0), d.get('avg_iter_time_seconds', 0)))"
+    fi
+done
+
+echo
+echo "[scaling] all points done → ${OUT_DIR}"

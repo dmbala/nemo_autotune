@@ -1,0 +1,56 @@
+#!/bin/bash
+#SBATCH --job-name=cb_per_node
+#SBATCH --partition=kempner_dev
+#SBATCH --account=kempner_dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --time=00:30:00
+#SBATCH --output=logs/%x.%A_%a.%j.out
+#SBATCH --error=logs/%x.%A_%a.%j.err
+
+# Runs one benchmark per allocation — intended to be submitted as a Slurm array
+# targeting specific nodes. To sweep a set of nodes:
+#
+#   NODES=(holygpu8a10301 holygpu8a10302 holygpu8a10303)
+#   for n in "${NODES[@]}"; do
+#     sbatch --nodelist=$n cluster_bench/sbatch/per_node.sbatch
+#   done
+#
+# Or as a pure array over any available node:
+#   sbatch --array=0-9 cluster_bench/sbatch/per_node.sbatch
+#
+# Each run produces $RESULTS_ROOT/cluster_bench/per_node/<host>_<ts>/ with:
+#   - benchmark_results.json   (MFU, TFLOPs/GPU, avg_iter_time_seconds)
+#   - snapshot_before.json + snapshot_after.json
+#   - stdout/stderr in logs/
+
+set -euo pipefail
+mkdir -p logs
+
+CLUSTER_BENCH_ROOT="${CLUSTER_BENCH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${CLUSTER_BENCH_ROOT}/shared/slurm_common.sh"
+
+HOST="$(hostname -s)"
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT_DIR="${RESULTS_ROOT}/cluster_bench/per_node/${HOST}_${TS}"
+mkdir -p "${OUT_DIR}"
+
+# Snapshot + run + snapshot. The snapshots wrap the benchmark so counter_delta
+# can catch any fabric hiccup during the run.
+"${CLUSTER_BENCH_ROOT}/scripts/ib_snapshot.sh" "${OUT_DIR}/snapshot_before.json"
+
+CONFIG="${CLUSTER_BENCH_ROOT}/configs/compute_baseline.yaml"
+"${CLUSTER_BENCH_ROOT}/shared/launch.sh" automodel -c "${CONFIG}" benchmark llm \
+    --benchmark.json_output_path="${OUT_DIR}/benchmark_results.json" \
+    --nproc-per-node=1
+
+"${CLUSTER_BENCH_ROOT}/scripts/ib_snapshot.sh" "${OUT_DIR}/snapshot_after.json"
+"${CLUSTER_BENCH_ROOT}/scripts/counter_delta.sh" \
+    "${OUT_DIR}/snapshot_before.json" \
+    "${OUT_DIR}/snapshot_after.json" \
+    > "${OUT_DIR}/counter_delta.log" 2>&1 || echo "[per_node] counter_delta reported errors — see ${OUT_DIR}/counter_delta.log"
+
+echo "[per_node] done: ${OUT_DIR}"

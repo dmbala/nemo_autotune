@@ -1,0 +1,73 @@
+# Storage-tier throughput benchmark. Runs a short Qwen3-1.7B training with
+# aggressive ckpt_every_steps so we get multiple DCP save events per run.
+# `sbatch/storage.sbatch` rotates checkpoint.checkpoint_dir through the tiers
+# (tmp / netscratch / holylfs) and records save timings per tier.
+
+seed: 1234
+
+benchmark:
+  warmup_steps: 2
+  peak_tflops: 989
+  nsys_start: -1
+  nsys_end: -1
+  nsys_ranks: []
+  num_nodes: 1
+
+step_scheduler:
+  global_batch_size: 8
+  local_batch_size: 4
+  ckpt_every_steps: 10        # frequent saves → more throughput samples per run
+  val_every_steps: 1000
+  num_epochs: 1
+  max_steps: 40
+
+distributed:
+  strategy: fsdp2
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  ep_size: 1
+  sequence_parallel: false
+  activation_checkpointing: false
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 10
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.AutoConfig.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3-1.7B
+
+# Each run writes ~14 GB (1.7B bf16 + optimizer state). 4 save events per run →
+# enough to average over. `checkpoint.checkpoint_dir` is always overridden by
+# the sbatch wrapper; the default here points at /tmp so a bare invocation
+# doesn't land bytes on a shared filesystem by accident.
+checkpoint:
+  enabled: true
+  checkpoint_dir: /tmp/cb_storage_default
+  model_save_format: safetensors
+  save_consolidated: false
+  is_async: false             # sync saves — we're measuring raw FS write bandwidth
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+  fp32_upcast: false
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.mock_iterable_dataset.MockIterableDataset
+  seq_len: 2048
+  num_samples: 100000
+
+dataloader:
+  batch_size: null
+  _target_: torch.utils.data.DataLoader
+  num_workers: 0
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
