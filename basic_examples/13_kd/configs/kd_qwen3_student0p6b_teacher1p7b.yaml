@@ -1,0 +1,92 @@
+# Module 13: Knowledge distillation — Qwen3-1.7B (teacher) → Qwen3-0.6B (student) on SQuAD.
+# Both models share the Qwen3 tokenizer → identical vocabulary, so token-level logit
+# matching is well-defined (KD between different tokenizer families is non-trivial).
+# Structure mirrors /opt/Automodel/examples/llm_kd/llama3_2/llama3_2_1b_kd.yaml.
+
+step_scheduler:
+  global_batch_size: 32
+  local_batch_size: 4
+  ckpt_every_steps: 100
+  val_every_steps: 50
+  num_epochs: 1
+  max_steps: 300
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 10
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 42
+  ranked: true
+
+# Student: the small model we're training.
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  pretrained_model_name_or_path: Qwen/Qwen3-0.6B
+  torch_dtype: bf16
+
+# Teacher: frozen, in eval mode. ~3x bigger than the student.
+teacher_model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  pretrained_model_name_or_path: Qwen/Qwen3-1.7B
+  torch_dtype: bf16
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: PATH_OVERRIDE_ckpt_dir
+  model_save_format: safetensors
+  save_consolidated: true    # student-only; teacher is never saved
+
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  sequence_parallel: false
+
+# Cross-entropy loss (against dataset labels) and KD loss (student-teacher KL) both contribute.
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+# KD mix:  loss = (1 - kd_ratio) * ce_loss  +  kd_ratio * kd_loss
+# 0 = pure CE (identical to SFT), 1 = pure KD (ignore labels, mimic teacher logits).
+kd_ratio: 0.5
+
+kd_loss_fn:
+  _target_: nemo_automodel.components.loss.kd_loss.KDLoss
+  ignore_index: -100
+  temperature: 2.0          # higher T softens distributions; 1–4 is typical
+  fp32_upcast: true         # safer KL numerics
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-5
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.squad.make_squad_dataset
+  dataset_name: rajpurkar/squad
+  split: train
+  limit_dataset_samples: 4000
+
+packed_sequence:
+  packed_sequence_size: 0
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+  shuffle: false
+
+validation_dataset:
+  _target_: nemo_automodel.components.datasets.llm.squad.make_squad_dataset
+  dataset_name: rajpurkar/squad
+  split: validation
+  limit_dataset_samples: 200
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater

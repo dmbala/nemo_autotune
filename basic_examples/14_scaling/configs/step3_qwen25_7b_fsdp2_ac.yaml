@@ -1,0 +1,67 @@
+# Step 3 of the scaling ladder: ~7B parameters.
+# World size: 1 node × 4 GPU.
+# New knob vs Step 2: activation_checkpointing: true.
+# 7B × bf16 = 14 GB weights + 14 GB grads + 56 GB Adam optimizer state = ~84 GB total
+# → sharded 4-way ≈ 21 GB/rank (fits 80 GB H100).
+# BUT activations at seq_len=2048 with 32 layers are ~20+ GB, won't fit without AC.
+
+seed: 1234
+
+benchmark:
+  warmup_steps: 5
+  peak_tflops: 989
+  nsys_start: -1
+  nsys_end: -1
+  nsys_ranks: []
+  num_nodes: 1
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 2
+  ckpt_every_steps: 1000
+  val_every_steps: 1000
+  num_epochs: 1
+  max_steps: 30
+
+distributed:
+  strategy: fsdp2
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  ep_size: 1
+  sequence_parallel: false
+  activation_checkpointing: true    # ← the new knob
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 10
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.AutoConfig.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen2.5-7B
+
+checkpoint:
+  enabled: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+  fp32_upcast: false
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.mock_iterable_dataset.MockIterableDataset
+  seq_len: 2048
+  num_samples: 100000
+
+dataloader:
+  batch_size: null
+  _target_: torch.utils.data.DataLoader
+  num_workers: 0
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0

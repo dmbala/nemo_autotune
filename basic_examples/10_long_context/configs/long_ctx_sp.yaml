@@ -1,0 +1,67 @@
+# Module 10 (path A): long-context finetune via sequence parallelism.
+# Sequence-parallel (SP) shards the activations along the sequence dim within
+# each tensor-parallel group. Requires tp_size > 1. Useful when activations
+# are the memory bottleneck (long seq_len × wide model).
+#
+# Here we keep it simple on 4 GPUs: tp=2, dp=2, SP on.
+
+step_scheduler:
+  global_batch_size: 8
+  local_batch_size: 1
+  ckpt_every_steps: 100
+  val_every_steps: 100
+  num_epochs: 1
+  max_steps: 100
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 15
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 1234
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  pretrained_model_name_or_path: Qwen/Qwen3-0.6B
+  torch_dtype: bf16
+
+checkpoint:
+  enabled: false   # measurement-focused; flip on for real runs
+
+distributed:
+  strategy: fsdp2
+  dp_size: 2
+  tp_size: 2
+  cp_size: 1
+  sequence_parallel: true       # ← the knob for SP
+  activation_checkpointing: true  # near-mandatory for long seq_len
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+# Synthetic long-context batches via the repo's mock dataset. Vocab is set to
+# 100 to keep memory small; the point is sequence length, not token diversity.
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.mock.build_unpacked_dataset
+  mean_len: 8192
+  std_len: 0
+  vocab_size: 100
+  max_sentence_len: 8192
+  seed: 0
+
+packed_sequence:
+  packed_sequence_size: 0
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+  shuffle: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 5.0e-5
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0

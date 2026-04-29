@@ -1,0 +1,232 @@
+#!/bin/bash
+#SBATCH --job-name=cb_accept
+#SBATCH --partition=kempner_dev
+#SBATCH --account=kempner_dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32
+#SBATCH --gres=gpu:4
+#SBATCH --mem=256G
+#SBATCH --time=00:45:00
+#SBATCH --output=logs/%x.%j.out
+#SBATCH --error=logs/%x.%j.err
+
+# End-to-end node-acceptance gate. Runs the 7 stages below in sequence on one
+# node. Emits a single verdict.json + a console PASS / WARN / FAIL.
+#
+# Usage:
+#   sbatch --nodelist=<node> cluster_bench/sbatch/accept_node.slrm
+#
+# Green-light thresholds (override via env):
+#   ACCEPT_MFU_FLOOR=40          # MFU%, absolute minimum
+#   ACCEPT_NCCL_BUSBW_FLOOR=150  # GB/s, all_reduce at 1 GB across 4 GPUs
+#   ACCEPT_MTTR_CEILING=300      # seconds, kill-and-resume wall clock
+#                                #   (180 s MAX_WAIT in kill_and_resume.sh + resume overhead)
+#
+# Verdict codes:
+#   PASS        — all stages within bounds
+#   WARN        — soft stage skipped (overlay missing, data missing) or warn
+#   FAIL        — affinity / compute / NCCL / MTTR / fabric outside bounds
+
+set -euo pipefail
+mkdir -p logs
+
+CLUSTER_BENCH_ROOT="${CLUSTER_BENCH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${CLUSTER_BENCH_ROOT}/shared/slurm_common.sh"
+
+ACCEPT_MFU_FLOOR="${ACCEPT_MFU_FLOOR:-40}"
+ACCEPT_NCCL_BUSBW_FLOOR="${ACCEPT_NCCL_BUSBW_FLOOR:-150}"
+ACCEPT_MTTR_CEILING="${ACCEPT_MTTR_CEILING:-300}"
+
+HOST="$(hostname -s)"
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT_DIR="${RESULTS_ROOT}/cluster_bench/accept/${HOST}_${TS}"
+STAGE_DIR="${OUT_DIR}/stages"
+mkdir -p "${STAGE_DIR}"
+
+# --- stage tracking via per-stage JSON fragments --------------------------------
+# Each register call writes ${STAGE_DIR}/<nn>_<name>.json. The final composer
+# reads the directory — no string concatenation, no shell quoting traps.
+STAGE_INDEX=0
+register() {
+    local stage="$1" outcome="$2" detail="${3:-}"
+    STAGE_INDEX=$((STAGE_INDEX + 1))
+    local path
+    path="${STAGE_DIR}/$(printf '%02d' "${STAGE_INDEX}")_${stage}.json"
+    python3 - "${path}" "${stage}" "${outcome}" "${detail}" <<'PY'
+import json, sys
+path, stage, outcome, detail = sys.argv[1:]
+with open(path, "w") as f:
+    json.dump({"stage": stage, "outcome": outcome, "detail": detail}, f)
+PY
+    echo "[stage] ${stage}: ${outcome}${detail:+ (${detail})}"
+}
+
+# Numeric comparator that doesn't depend on `bc` (not always installed).
+# Returns 0 iff arg1 >= arg2 (both floats).
+fge() { awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{exit !(a+0 >= b+0)}'; }
+
+# --- Stage 1: static snapshot (fast, always-on) -------------------------------
+echo "=== Stage 1: static topology snapshot ==="
+"${CLUSTER_BENCH_ROOT}/scripts/ib_snapshot.sh" "${OUT_DIR}/snapshot_before.json"
+register "snapshot_before" "PASS" ""
+
+# --- Stage 2: affinity check ---------------------------------------------------
+echo "=== Stage 2: GPU↔NIC affinity ==="
+if "${CLUSTER_BENCH_ROOT}/scripts/affinity_check.sh" \
+    --snapshot "${OUT_DIR}/snapshot_before.json" \
+    > "${OUT_DIR}/affinity.log" 2>&1; then
+    register "affinity" "PASS" ""
+else
+    rc=$?
+    register "affinity" "FAIL" "rc=${rc}"
+fi
+
+# --- Stage 3: per-GPU MFU baseline (1 GPU) -------------------------------------
+echo "=== Stage 3: compute baseline (Qwen3-1.7B, 1 GPU) ==="
+CONFIG="${CLUSTER_BENCH_ROOT}/configs/compute_baseline.yaml"
+if "${CLUSTER_BENCH_ROOT}/shared/launch.sh" automodel -c "${CONFIG}" benchmark llm \
+    --benchmark.json_output_path="${OUT_DIR}/compute_baseline.json" \
+    --nproc-per-node=1 > "${OUT_DIR}/compute_baseline.log" 2>&1; then
+    # Extract MFU via container Python (host Python is 3.6; json.load still works either way).
+    mfu="$(python3 -c 'import json,sys;
+try:
+    d = json.load(open(sys.argv[1]));
+    print(d.get("avg_mfu_percent", 0))
+except Exception:
+    print(0)' "${OUT_DIR}/compute_baseline.json" 2>/dev/null || echo 0)"
+    echo "  MFU = ${mfu}%"
+    if fge "${mfu}" "${ACCEPT_MFU_FLOOR}"; then
+        register "compute_mfu" "PASS" "${mfu}%"
+    else
+        register "compute_mfu" "FAIL" "${mfu}% < floor ${ACCEPT_MFU_FLOOR}%"
+    fi
+else
+    register "compute_mfu" "FAIL" "benchmark crashed (see compute_baseline.log)"
+fi
+
+# --- Stage 4: intra-node NCCL all_reduce ---------------------------------------
+echo "=== Stage 4: NCCL all_reduce intra-node (${GPUS_PER_NODE} GPU) ==="
+if [[ -f "${CLUSTER_BENCH_ROOT}/nccl_tests/overlay.img" ]]; then
+    "${CLUSTER_BENCH_ROOT}/nccl_tests/run_collective.sh" all_reduce -g "${GPUS_PER_NODE}" \
+        > "${OUT_DIR}/nccl_allreduce.log" 2>&1 || true
+    # Parse the 1 GB row out of the raw nccl-tests table.
+    busbw="$(awk '/^[[:space:]]*1073741824[[:space:]]/ {print $8; exit}' "${OUT_DIR}/nccl_allreduce.log" 2>/dev/null)"
+    busbw="${busbw:-0}"
+    echo "  NCCL all_reduce 1GB busbw = ${busbw} GB/s"
+    if fge "${busbw}" "${ACCEPT_NCCL_BUSBW_FLOOR}"; then
+        register "nccl_all_reduce" "PASS" "${busbw} GB/s"
+    else
+        register "nccl_all_reduce" "FAIL" "${busbw} GB/s < floor ${ACCEPT_NCCL_BUSBW_FLOOR} GB/s"
+    fi
+else
+    register "nccl_all_reduce" "WARN" "overlay not built (run nccl_tests/install_overlay.sh); skipped"
+fi
+
+# --- Stage 5: storage to /tmp (fastest tier; uptime check) ---------------------
+echo "=== Stage 5: /tmp checkpoint save ==="
+STORAGE_CKPT="/tmp/cb_accept_${HOST}_${TS}"
+mkdir -p "${STORAGE_CKPT}"
+if "${CLUSTER_BENCH_ROOT}/shared/launch.sh" automodel \
+    -c "${CLUSTER_BENCH_ROOT}/configs/storage.yaml" benchmark llm \
+    --checkpoint.checkpoint_dir="${STORAGE_CKPT}" \
+    --benchmark.json_output_path="${OUT_DIR}/storage_tmp.json" \
+    --step_scheduler.max_steps=20 --step_scheduler.ckpt_every_steps=10 \
+    --nproc-per-node=1 > "${OUT_DIR}/storage_tmp.log" 2>&1; then
+    bytes="$(du -sb "${STORAGE_CKPT}" 2>/dev/null | awk '{print $1}')"
+    echo "  bytes written = ${bytes:-0}"
+    register "storage_tmp" "PASS" "${bytes:-0} bytes"
+else
+    rc=$?
+    register "storage_tmp" "WARN" "storage bench exited rc=${rc}"
+fi
+rm -rf "${STORAGE_CKPT}"
+
+# --- Stage 6: MTTR (kill-and-resume) ------------------------------------------
+echo "=== Stage 6: MTTR (kill + resume) ==="
+KAR="${BASIC_EXAMPLES_ROOT}/08_fault_tolerance/kill_and_resume.sh"
+if [[ -x "${KAR}" && -f "${DATA_ROOT}/shakespeare/train.bin" ]]; then
+    start="$(date +%s)"
+    "${KAR}" "${DATA_ROOT}/shakespeare/train.bin" "${OUT_DIR}/mttr_ckpts" 180 \
+        > "${OUT_DIR}/mttr.log" 2>&1 || true
+    mttr=$(( $(date +%s) - start ))
+    echo "  MTTR wall = ${mttr}s"
+    if (( mttr <= ACCEPT_MTTR_CEILING )); then
+        register "mttr" "PASS" "${mttr}s"
+    else
+        register "mttr" "FAIL" "${mttr}s > ceiling ${ACCEPT_MTTR_CEILING}s"
+    fi
+    rm -rf "${OUT_DIR}/mttr_ckpts"
+else
+    register "mttr" "WARN" "${KAR} or tinyshakespeare data missing; skipped"
+fi
+
+# --- Stage 7: post-run snapshot + counter delta --------------------------------
+echo "=== Stage 7: IB counter delta ==="
+"${CLUSTER_BENCH_ROOT}/scripts/ib_snapshot.sh" "${OUT_DIR}/snapshot_after.json"
+if "${CLUSTER_BENCH_ROOT}/scripts/counter_delta.sh" \
+    "${OUT_DIR}/snapshot_before.json" \
+    "${OUT_DIR}/snapshot_after.json" \
+    > "${OUT_DIR}/counter_delta.log" 2>&1; then
+    register "ib_counters" "PASS" ""
+else
+    register "ib_counters" "FAIL" "error counters advanced (see counter_delta.log)"
+fi
+
+# --- Compose verdict -----------------------------------------------------------
+VERDICT_JSON="${OUT_DIR}/verdict.json"
+python3 - "${STAGE_DIR}" "${VERDICT_JSON}" "${HOST}" \
+        "${RESULTS_ROOT}/cluster_bench/history.jsonl" <<'PY'
+import datetime
+import json
+import pathlib
+import sys
+
+stage_dir = pathlib.Path(sys.argv[1])
+out_path = pathlib.Path(sys.argv[2])
+host = sys.argv[3]
+history = pathlib.Path(sys.argv[4])
+
+stages = {}
+for fragment in sorted(stage_dir.glob("*.json")):
+    s = json.loads(fragment.read_text())
+    stages[s["stage"]] = {"outcome": s["outcome"], "detail": s["detail"]}
+
+bucket = {"PASS": [], "WARN": [], "FAIL": []}
+for name, s in stages.items():
+    bucket.get(s["outcome"], bucket["WARN"]).append(name)
+
+if bucket["FAIL"]:
+    verdict = "FAIL"
+elif bucket["WARN"]:
+    verdict = "WARN"
+else:
+    verdict = "PASS"
+
+doc = {
+    "hostname": host,
+    "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    "verdict": verdict,
+    "passed": bucket["PASS"],
+    "warned": bucket["WARN"],
+    "failed": bucket["FAIL"],
+    "stages": stages,
+}
+out_path.write_text(json.dumps(doc, indent=2))
+
+# Append a row to history.jsonl for trend tracking.
+history.parent.mkdir(parents=True, exist_ok=True)
+with history.open("a") as f:
+    f.write(json.dumps({
+        "kind": "accept_node",
+        "hostname": host,
+        "timestamp_utc": doc["timestamp_utc"],
+        "verdict": verdict,
+    }) + "\n")
+
+print(f"[accept] verdict={verdict} → {out_path}")
+print(f"  passed: {bucket['PASS'] or '(none)'}")
+print(f"  warned: {bucket['WARN'] or '(none)'}")
+print(f"  failed: {bucket['FAIL'] or '(none)'}")
+sys.exit(1 if verdict == "FAIL" else 0)
+PY

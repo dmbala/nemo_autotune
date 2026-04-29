@@ -1,137 +1,50 @@
-# nemo_autotune
+# NeMo Automodel
 
-A collection of examples for autotuning, training, and deploying Large Language Models (LLMs), Vision Language Models (VLMs), and diffusion models using the [NVIDIA NeMo Framework](https://github.com/NVIDIA/NeMo).
+Training examples and cluster diagnostics for Kempner-style H100/H200 Slurm clusters, built on the NeMo-Automodel Singularity image. Two top-level trees: [`basic_examples/`](basic_examples/) (hands-on training modules) and [`cluster_bench/`](cluster_bench/) (HPC health / acceptance / regression suite).
 
----
+Both trees run inside the same SIF via [`basic_examples/shared/launch.sh`](basic_examples/shared/launch.sh); `cluster_bench/` reuses it through a `shared → ../basic_examples/shared` symlink.
 
-## Overview
+## [`basic_examples/`](basic_examples/) — NeMo-Automodel workshop
 
-`nemo_autotune` provides ready-to-use scripts and configurations that leverage NeMo's built-in autotuning capabilities to find optimal training hyperparameters (micro-batch size, tensor parallelism, pipeline parallelism, etc.) for your hardware cluster, and then launch fully-optimised training and inference runs.
+18 numbered modules covering the full Automodel workflow end-to-end. Run in order the first time through; each depends on artifacts from the previous.
 
----
+| #  | Name               | Purpose                                                                        |
+|----|--------------------|--------------------------------------------------------------------------------|
+| 00 | [`00_setup/`](basic_examples/00_setup/) | Container smoke test: imports, CUDA, FSDP2 config fields.                      |
+| 01 | [`01_data/`](basic_examples/01_data/) | Tokenize + shard text for `NanogptDataset`; build chat/SFT JSONL.              |
+| 02 | [`02_pretrain/`](basic_examples/02_pretrain/) | Pretrain nanoGPT-style GPT-2 from random init (tiny + FineWeb scales).         |
+| 03 | [`03_distributed/`](basic_examples/03_distributed/) | FSDP2 / MegatronFSDP / TP / PP / HSDP; DCP checkpointing; HF export.           |
+| 04 | [`04_finetune/`](basic_examples/04_finetune/) | SFT Track A (continue pretrained GPT-2) and Track B (HF model + LoRA).         |
+| 05 | [`05_inference/`](basic_examples/05_inference/) | Generation via `AutoModelForCausalLM.generate` (one-shot, REPL, batched).      |
+| 06 | [`06_profiling/`](basic_examples/06_profiling/) | nsys via benchmark recipe; `torch.profiler` sidecar; grid-sweep autotuner.     |
+| 07 | [`07_eval/`](basic_examples/07_eval/) | `lm-eval-harness` via writable overlay + LLM-as-judge.                         |
+| 08 | [`08_fault_tolerance/`](basic_examples/08_fault_tolerance/) | Kill-and-resume, DCP reshardable load, torch elastic, signal-safe saves.    |
+| 09 | [`09_fp8/`](basic_examples/09_fp8/) | FP8 training via Transformer Engine + `torch.compile` (H100/H200 only).        |
+| 10 | [`10_long_context/`](basic_examples/10_long_context/) | Long-context training via sequence-parallel (SP) and context-parallel (CP).    |
+| 11 | [`11_custom_model/`](basic_examples/11_custom_model/) | Register a custom `PreTrainedModel` subclass (RoPE-GPT) via `_target_`.        |
+| 12 | [`12_vllm_serve/`](basic_examples/12_vllm_serve/) | vLLM OpenAI-compatible server against a consolidated HF checkpoint.            |
+| 13 | [`13_kd/`](basic_examples/13_kd/) | Knowledge distillation: Qwen3-1.7B teacher → Qwen3-0.6B student.               |
+| 14 | [`14_scaling/`](basic_examples/14_scaling/) | Scaling ladder 100M → 120B, one new parallelism knob per step.                 |
+| 15 | [`15_vlm/`](basic_examples/15_vlm/) | VLM finetune: Gemma3-VL-4B LoRA on CORD-V2 via `finetune vlm` CLI.             |
+| 16 | [`16_mamba/`](basic_examples/16_mamba/) | Mamba-2 state-space model via the same LLM recipe (architecture-agnostic).     |
+| 17 | [`17_diffusion/`](basic_examples/17_diffusion/) | Diffusion & flow matching: pretrain / finetune (LoRA) / generate.              |
 
-## Features
+See [`basic_examples/README.md`](basic_examples/README.md) for prerequisites, the launch pattern, and env-var reference.
 
-- **Automatic hyperparameter search** – uses NeMo's autotuner to sweep over parallelism strategies and batch sizes to maximize GPU utilization and throughput.
-- **LLM support** – examples covering GPT-style models (e.g., Llama, Mistral, Mixtral).
-- **VLM support** – examples for vision-language models (e.g., CLIP, LLaVA).
-- **Diffusion model support** – examples for latent-diffusion and score-based generative models.
-- **Multi-node ready** – configurations tested on single-node and multi-node SLURM/Kubernetes clusters.
-- **NeMo 2.x API** – examples use the modern `nemo.collections` and `nemo.lightning` APIs.
+## [`cluster_bench/`](cluster_bench/) — HPC diagnostic suite
 
----
+Repurposes the workshop's benchmark recipe and distributed primitives as a cluster health / acceptance / regression suite. Six build stages:
 
-## Prerequisites
+1. **Static diagnostics** — `nvidia-smi` topology snapshots, GPU↔IB-HCA affinity audit, IB counter-delta checker. See [`cluster_bench/scripts/`](cluster_bench/scripts/).
+2. **Training baselines** — per-node MFU on Qwen3-1.7B (straggler detection) + world-size scaling on Qwen2.5-7B (intra-node NVLink, inter-node IB). See [`cluster_bench/sbatch/`](cluster_bench/sbatch/).
+3. **NCCL microbenchmarks** — writable overlay with nccl-tests; intra-node, inter-node, and all-pairs heatmaps. See [`cluster_bench/nccl_tests/`](cluster_bench/nccl_tests/).
+4. **Storage** — DCP checkpoint throughput across filesystem tiers (tmp / netscratch / holylfs).
+5. **MTTR + drift** — kill-and-resume wall-clock, 7-day p50 baselines, regression flagging with sparklines.
+6. **Acceptance gate** — single [`accept_node.slrm`](cluster_bench/sbatch/accept_node.slrm) runs all seven checks and emits `PASS` / `WARN` / `FAIL`.
 
-| Requirement | Version |
-|---|---|
-| Python | ≥ 3.10 |
-| CUDA | ≥ 12.1 |
-| PyTorch | ≥ 2.2 |
-| NVIDIA NeMo Framework | ≥ 2.0 |
-| NVIDIA Apex | latest |
-| Megatron-LM | bundled with NeMo |
+Hardcoded for Kempner (`partition=kempner_dev`, `/n/netscratch` + `/n/holylfs06` paths, shared SIF). See [`cluster_bench/README.md`](cluster_bench/README.md) for thresholds, the results layout, and the correlator / report pipeline.
 
-The easiest way to satisfy all prerequisites is to use the official NeMo container:
+## Start here
 
-```bash
-docker pull nvcr.io/nvidia/nemo:25.02
-```
-
----
-
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/dmbala/nemo_autotune.git
-cd nemo_autotune
-
-# (Optional) create a virtual environment
-python -m venv .venv && source .venv/bin/activate
-
-# Install NeMo with all extras
-pip install "nemo_toolkit[all]"
-```
-
----
-
-## Quick Start
-
-### 1. Autotune a Llama-3 8B model
-
-```bash
-python examples/llm/llama3_autotune.py \
-    --model_size 8b \
-    --num_nodes 1 \
-    --num_gpus_per_node 8 \
-    --max_minutes_per_run 5 \
-    --output_dir ./autotune_results
-```
-
-The autotuner will:
-1. Profile a range of parallelism/batch-size combinations.
-2. Select the configuration that achieves the highest training throughput.
-3. Write the optimal `trainer_config.yaml` to `output_dir`.
-
-### 2. Launch training with the tuned configuration
-
-```bash
-python examples/llm/llama3_train.py \
-    --config ./autotune_results/trainer_config.yaml
-```
-
----
-
-## Repository Structure
-
-```
-nemo_autotune/
-├── examples/
-│   ├── llm/          # LLM training & autotuning examples
-│   ├── vlm/          # Vision-language model examples
-│   └── diffusion/    # Diffusion model examples
-├── configs/          # Base YAML configurations
-└── README.md
-```
-
----
-
-## Configuration
-
-Key autotuning parameters (set via CLI or YAML):
-
-| Parameter | Description | Default |
-|---|---|---|
-| `num_nodes` | Number of compute nodes | `1` |
-| `num_gpus_per_node` | GPUs per node | `8` |
-| `max_minutes_per_run` | Time budget per trial | `5` |
-| `model_size` | Model size shorthand (e.g., `7b`, `13b`, `70b`) | — |
-| `tensor_model_parallel_size` | Tensor parallelism degree (autotuned if not set) | auto |
-| `pipeline_model_parallel_size` | Pipeline parallelism degree (autotuned if not set) | auto |
-| `micro_batch_size` | Per-GPU micro batch size (autotuned if not set) | auto |
-
----
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request.
-
-1. Fork the repository.
-2. Create a feature branch: `git checkout -b feature/my-feature`.
-3. Commit your changes: `git commit -m "Add my feature"`.
-4. Push and open a PR against `main`.
-
----
-
-## License
-
-This project is licensed under the [Apache 2.0 License](LICENSE).
-
----
-
-## References
-
-- [NVIDIA NeMo Framework](https://github.com/NVIDIA/NeMo)
-- [NeMo Documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/)
-- [Megatron-LM](https://github.com/NVIDIA/Megatron-LM)
+- Workshop walkthrough: **[`basic_examples/README.md`](basic_examples/README.md)**
+- Cluster diagnostics: **[`cluster_bench/README.md`](cluster_bench/README.md)**

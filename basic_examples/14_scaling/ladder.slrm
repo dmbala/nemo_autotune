@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH --job-name=ws14_scaling
+#SBATCH --partition=kempner_dev
+#SBATCH --account=kempner_dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:4
+#SBATCH --mem=256G
+#SBATCH --time=01:00:00
+#SBATCH --output=logs/%x.%j.out
+#SBATCH --error=logs/%x.%j.err
+
+# Auto-pick ladder step based on world size, or override via env:
+#   STEP=step3 sbatch 14_scaling/ladder.slrm
+#
+# For multi-node steps (step6 = 2 nodes, step7 = 8 nodes), override the SBATCH
+# directives. Use `--export=ALL,STEP=...` so SLURM/user env is preserved:
+#   sbatch --nodes=2 --export=ALL,STEP=step6 14_scaling/ladder.slrm
+
+set -euo pipefail
+mkdir -p logs
+
+WORKSHOP_ROOT="${WORKSHOP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${WORKSHOP_ROOT}/shared/slurm_common.sh"
+
+NPROC=$(( NNODES * GPUS_PER_NODE ))
+
+# Default step selection: the biggest that fits the current allocation.
+STEP="${STEP:-}"
+if [[ -z "${STEP}" ]]; then
+    if   (( NPROC >= 64 ));  then STEP=step7
+    elif (( NNODES >= 2 ));  then STEP=step6
+    elif (( NPROC >= 8 ));   then STEP=step5
+    elif (( NPROC >= 4 ));   then STEP=step4
+    else                          STEP=step2
+    fi
+fi
+
+echo "[ladder] world_size=${NPROC} (nnodes=${NNODES} × gpus/node=${GPUS_PER_NODE})"
+echo "[ladder] selected STEP=${STEP}"
+
+"${WORKSHOP_ROOT}/14_scaling/ladder.sh" "${STEP}" --nproc-per-node="${GPUS_PER_NODE}"

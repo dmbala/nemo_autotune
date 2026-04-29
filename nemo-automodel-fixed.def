@@ -1,0 +1,10 @@
+Bootstrap: localimage
+From: /n/holylfs06/LABS/kempner_shared/Everyone/containers/applications/nemo/nemo-automodel-26.02.sif
+
+%post
+    chmod -R a+rX /opt/Automodel
+    chmod -R a+rX /opt/venv
+
+%labels
+    derived.from nvcr.io/nvidia/nemo-automodel:26.02
+    derived.fix chmod a+rX /opt/Automodel /opt/venv

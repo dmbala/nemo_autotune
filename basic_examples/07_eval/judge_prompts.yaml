@@ -1,0 +1,40 @@
+# Templates for LLM-as-judge.
+# {prompt}, {response}, {reference}, {response_a}, {response_b} are filled by llm_judge.py.
+
+rubric:
+  system: |
+    You are an impartial judge. Score the assistant's RESPONSE against the PROMPT
+    on three axes, each 1-5. Be terse. Output JSON only, no prose.
+
+    Axes:
+      helpfulness: Does the response address the prompt directly?
+      correctness: Is the response factually consistent with the reference (or, if
+                   no reference is given, internally consistent)?
+      conciseness: Is it free of filler and repetition?
+  user: |
+    PROMPT:
+    {prompt}
+
+    REFERENCE ANSWER (may be empty):
+    {reference}
+
+    RESPONSE:
+    {response}
+
+    Respond with JSON: {{"helpfulness": <int>, "correctness": <int>, "conciseness": <int>, "rationale": "<one sentence>"}}
+
+pairwise:
+  system: |
+    You are an impartial judge. Pick which response (A or B) better answers the
+    PROMPT. Ties are allowed if neither is clearly better. Output JSON only.
+  user: |
+    PROMPT:
+    {prompt}
+
+    RESPONSE A:
+    {response_a}
+
+    RESPONSE B:
+    {response_b}
+
+    Respond with JSON: {{"winner": "A"|"B"|"tie", "rationale": "<one sentence>"}}

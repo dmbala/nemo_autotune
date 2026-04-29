@@ -1,0 +1,81 @@
+# Step 6 of the scaling ladder: ~70B dense.
+# World size: 2 nodes × 4 GPU = 8 ranks.
+# New knob vs Step 4: pipeline parallel (pp_size) across nodes.
+# 70B × bf16 = 140 GB weights alone. Even with FSDP2 dp=8, that's 17.5 GB weights
+# per rank — plus 17.5 GB grads + 70 GB Adam state / 8 = ~44 GB/rank. Fits, but
+# activations at seq_len=2048 put it over the edge. PP splits the model's layers
+# across pipeline stages, so each rank only holds 1/pp_size of the depth.
+# Layout here: dp=2, tp=2, pp=2 → 2 × 2 × 2 = 8. TP/DP within a node, PP across.
+#
+# Adapted from /opt/Automodel/examples/llm_finetune/llama3_3/llama3_3_70b_instruct_peft_benchmark.yaml.
+
+seed: 1234
+
+benchmark:
+  warmup_steps: 10
+  peak_tflops: 989
+  nsys_start: -1
+  nsys_end: -1
+  nsys_ranks: []
+  num_nodes: 2
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 1
+  ckpt_every_steps: 1000
+  val_every_steps: 1000
+  num_epochs: 1
+  max_steps: 30
+
+distributed:
+  strategy: fsdp2
+  dp_size: 2
+  tp_size: 2
+  cp_size: 1
+  pp_size: 2              # ← new
+  ep_size: 1
+  sequence_parallel: true
+  activation_checkpointing: true
+
+  pipeline:
+    pp_schedule: interleaved1f1b     # reduces pipeline bubbles
+    pp_microbatch_size: 1
+    round_virtual_stages_to_pp_multiple: down
+    scale_grads_in_schedule: false
+    patch_inner_model: false
+    patch_causal_lm_model: false
+    layers_per_stage: 10             # 70B Llama has 80 layers → 80/2/4 interleaved stages
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 20
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.AutoConfig.from_pretrained
+    pretrained_model_name_or_path: meta-llama/Llama-3.3-70B-Instruct
+
+checkpoint:
+  enabled: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+  fp32_upcast: false
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.mock_iterable_dataset.MockIterableDataset
+  seq_len: 2048
+  num_samples: 100000
+
+dataloader:
+  batch_size: null
+  _target_: torch.utils.data.DataLoader
+  num_workers: 0
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0

@@ -1,0 +1,75 @@
+# Tiny GPT-2 (~10M params) pretrain on Tiny-Shakespeare.
+# Single-GPU, ~5 min on 1xH200. Structure mirrors
+# /opt/Automodel/examples/llm_pretrain/nanogpt_pretrain.yaml.
+#
+# Paths with "PATH_OVERRIDE" below are overridden by pretrain.sh via CLI
+# (e.g. --dataset.file_pattern=/abs/path/train.bin). Set SCRATCH_ROOT to
+# control where runs land.
+
+step_scheduler:
+  global_batch_size: 32
+  local_batch_size: 32
+  ckpt_every_steps: 500
+  val_every_steps: 100
+  num_epochs: 1
+  max_steps: 500
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 5
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 1234
+  ranked: true
+
+# Tiny nanoGPT: 6 layers, 4 heads, 128 hidden, ctx=256 → ~10M params.
+# Use the HF-backed construction so consolidated checkpoints get save_pretrained().
+# (The `build_gpt2_model` builder returns a minimal nn.Module without save_pretrained.)
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.GPT2Config
+    vocab_size: 50258
+    n_positions: 256
+    n_ctx: 256
+    n_embd: 128
+    n_layer: 6
+    n_head: 4
+    bos_token_id: 50256
+    eos_token_id: 50256
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.nanogpt_dataset.NanogptDataset
+  file_pattern: PATH_OVERRIDE_train_bin
+  seq_len: 256
+  shuffle_files: true
+  align_to_bos: false
+  bos_token: 50256
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  shuffle: false
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 3.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: PATH_OVERRIDE_ckpt_dir
+  model_save_format: safetensors
+  save_consolidated: true

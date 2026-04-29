@@ -1,0 +1,70 @@
+# Base config for the BenchmarkingRecipeForNextTokenPrediction.
+# Used both as-is (sweep.py generates per-run overrides) and by the nsys runner.
+# Mirrors /opt/Automodel/examples/benchmark/configs/qwen3_moe_30b_torch.yaml (trimmed).
+
+seed: 1234
+
+# Benchmark knobs. Set peak_tflops to your hardware: H100=989, H200=989, A100=312.
+# Override --benchmark.num_nodes at launch if you want multi-node aggregation.
+benchmark:
+  warmup_steps: 5
+  peak_tflops: 989
+  nsys_start: -1
+  nsys_end: -1
+  nsys_ranks: []
+  num_nodes: 1
+  json_output_path: PATH_OVERRIDE_json
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 4
+  ckpt_every_steps: 1000
+  val_every_steps: 1000
+  num_epochs: 1
+  max_steps: 30
+
+distributed:
+  strategy: fsdp2
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  sequence_parallel: false
+  activation_checkpointing: true
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 10
+
+# Use a small HF model so the benchmark can self-configure vocab_size via AutoConfig.
+# Override --model.config.pretrained_model_name_or_path to test a different model.
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.AutoConfig.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3-0.6B
+  trust_remote_code: false
+
+checkpoint:
+  enabled: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+  fp32_upcast: false
+
+# Mock dataset — no real data needed, throughput-measurement only.
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.mock_iterable_dataset.MockIterableDataset
+  seq_len: 1024
+  num_samples: 100000
+
+dataloader:
+  batch_size: null           # dataset already emits batches
+  _target_: torch.utils.data.DataLoader
+  num_workers: 0
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0

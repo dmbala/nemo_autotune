@@ -1,0 +1,71 @@
+# Single-node 4-GPU FSDP2 pretrain. Reuses the 124M GPT-2 definition from
+# Module 02 but trims steps so a student can watch distributed training end-to-end
+# in ~10 min on 4xH100. Overrides pretrain.sh's defaults for dataset and ckpt dir.
+
+step_scheduler:
+  global_batch_size: 64
+  local_batch_size: 4
+  ckpt_every_steps: 50
+  val_every_steps: 100
+  num_epochs: 1
+  max_steps: 100
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 10
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 1234
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.GPT2Config
+    vocab_size: 50258
+    n_positions: 1024
+    n_ctx: 1024
+    n_embd: 768
+    n_layer: 12
+    n_head: 12
+    bos_token_id: 50256
+    eos_token_id: 50256
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.nanogpt_dataset.NanogptDataset
+  file_pattern: PATH_OVERRIDE_train_bin
+  seq_len: 1024
+  shuffle_files: true
+  align_to_bos: false
+  bos_token: 50256
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  shuffle: false
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 3.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+
+# Pure data-parallel FSDP2 across all 4 GPUs on one node.
+# dp_size: none → world_size / (tp*pp*cp*ep). With tp=pp=cp=ep=1 and world_size=4, dp=4.
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+  activation_checkpointing: true
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: PATH_OVERRIDE_ckpt_dir
+  model_save_format: safetensors
+  save_consolidated: true

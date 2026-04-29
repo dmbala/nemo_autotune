@@ -1,0 +1,98 @@
+# Module 15: Gemma3-VL-4B LoRA-finetune on CORD-V2 (receipt parsing → image-to-text).
+# Trimmed from /opt/Automodel/examples/vlm_finetune/gemma3/gemma3_vl_4b_cord_v2_peft.yaml.
+# The VLM finetune recipe lives at /opt/Automodel/nemo_automodel/recipes/vlm/finetune.py —
+# same YAML shape as the LLM recipe plus:
+#   * model._target_ = NeMoAutoModelForImageTextToText.from_pretrained
+#   * dataset builders from nemo_automodel.components.datasets.vlm.*
+#   * freeze_config to freeze the vision tower / embeddings during LoRA-adaptation
+
+step_scheduler:
+  global_batch_size: 8
+  local_batch_size: 1
+  ckpt_every_steps: 100
+  val_every_steps: 500
+  num_epochs: 1
+  max_steps: 300
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 10
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 42
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained
+  pretrained_model_name_or_path: google/gemma-3-4b-it
+  torch_dtype: torch.bfloat16
+  use_liger_kernel: false
+  attn_implementation: eager
+
+# LoRA on the language side only — vision tower stays frozen.
+peft:
+  _target_: nemo_automodel.components._peft.lora.PeftConfig
+  match_all_linear: False
+  exclude_modules:
+    - "*vision_tower*"
+    - "*vision*"
+    - "*visual*"
+    - "*image_encoder*"
+    - "*lm_head*"
+  dim: 8
+  alpha: 32
+  use_triton: True
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: PATH_OVERRIDE_ckpt_dir
+  model_save_format: safetensors
+  save_consolidated: true
+  is_peft: true
+
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+# CORD-V2: ~1k training receipts labelled with structured JSON. Good small-VLM benchmark.
+dataset:
+  _target_: nemo_automodel.components.datasets.vlm.datasets.make_cord_v2_dataset
+  path_or_dataset: naver-clova-ix/cord-v2
+  split: train
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  num_workers: 1
+  pin_memory: true
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.vlm.collate_fns.default_collate_fn
+
+validation_dataset:
+  _target_: nemo_automodel.components.datasets.vlm.datasets.make_cord_v2_dataset
+  path_or_dataset: naver-clova-ix/cord-v2
+  split: validation
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  num_workers: 1
+  collate_fn:
+    _target_: nemo_automodel.components.datasets.vlm.collate_fns.default_collate_fn
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-5
+  weight_decay: 0.01
+  betas: [0.9, 0.95]
+
+# VLM-specific block: train only the text decoder adapters.
+freeze_config:
+  freeze_embeddings: true
+  freeze_vision_tower: true
+  freeze_language_model: false

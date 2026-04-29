@@ -1,0 +1,100 @@
+# Step 7 of the scaling ladder: GPT-OSS-120B MoE, multi-node.
+# World size: 8 nodes × 8 GPU = 64 ranks.
+# New layering: dp (implicit) + ep=64 (one expert per rank).
+# 120B × bf16 = 240 GB weights → only feasible by sharding experts to one-per-rank.
+#
+# This is the full-stack pattern that Automodel's upstream config uses:
+#   /opt/Automodel/examples/benchmark/configs/gptoss_120b_te_deepep.yaml.
+#
+# Production throughput requires Transformer Engine + DeepEP (for all-to-all
+# expert dispatch over RDMA). TE 2.11 is in the container; DeepEP isn't — the
+# container was built with INSTALL_UCCL_EP=False. To run this on real RDMA
+# hardware, rebuild with INSTALL_UCCL_EP=True, or swap `attn: flex / linear: te`
+# for `attn: sdpa / linear: torch` (losing substantial perf but training still
+# converges).
+#
+# For workshop purposes this config is primarily a reference — actually running
+# it requires an 8-node H100 allocation.
+
+seed: 1234
+
+benchmark:
+  warmup_steps: 10
+  peak_tflops: 989
+  nsys_start: -1
+  nsys_end: -1
+  nsys_ranks: []
+  num_nodes: 8
+
+step_scheduler:
+  global_batch_size: 512
+  local_batch_size: 2
+  ckpt_every_steps: 1000
+  val_every_steps: 1000
+  num_epochs: 1
+  max_steps: 30
+
+distributed:
+  strategy: fsdp2
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  ep_size: 64                # ← shard experts across all ranks
+  sequence_parallel: false
+  activation_checkpointing: true
+
+  pipeline:
+    pp_schedule: interleaved1f1b
+    pp_microbatch_size: 2
+    round_virtual_stages_to_pp_multiple: down
+    scale_grads_in_schedule: false
+    patch_inner_model: false
+    patch_causal_lm_model: false
+    layers_per_stage: 2
+
+  moe:
+    reshard_after_forward: true
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 20
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.AutoConfig.from_pretrained
+    pretrained_model_name_or_path: openai/gpt-oss-120b
+  trust_remote_code: true
+  backend:
+    _target_: nemo_automodel.components.models.common.BackendConfig
+    attn: sdpa        # upstream uses `flex`; needs TE + DeepEP for max perf
+    linear: torch     # upstream uses `te`
+    rms_norm: torch
+    experts: torch    # upstream uses `te`
+    dispatcher: torch # upstream uses `deepep`
+    fake_balanced_gate: true
+    enable_hf_state_dict_adapter: false
+
+checkpoint:
+  enabled: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+  fp32_upcast: false
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.mock_iterable_dataset.MockIterableDataset
+  seq_len: 4096
+  num_samples: 100000
+
+dataloader:
+  batch_size: null
+  _target_: torch.utils.data.DataLoader
+  num_workers: 0
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0

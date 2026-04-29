@@ -1,0 +1,66 @@
+# Module 10 (path B): long-context via context parallelism.
+# Context-parallel (CP) shards the sequence itself across ranks, with ring-
+# all-reduce across CP ranks inside attention. Lets you train at seq_len much
+# longer than a single GPU's memory allows, without needing TP.
+#
+# Requires cp_size > 1. Here: cp=2, dp=2 on 4 GPUs.
+
+step_scheduler:
+  global_batch_size: 8
+  local_batch_size: 1
+  ckpt_every_steps: 100
+  val_every_steps: 100
+  num_epochs: 1
+  max_steps: 100
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 15
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 1234
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  pretrained_model_name_or_path: Qwen/Qwen3-0.6B
+  torch_dtype: bf16
+
+checkpoint:
+  enabled: false
+
+distributed:
+  strategy: fsdp2
+  dp_size: 2
+  tp_size: 1
+  cp_size: 2                     # ← the knob for CP
+  sequence_parallel: false
+  activation_checkpointing: true
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+# Push seq_len beyond what one GPU could hold in memory.
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.mock.build_unpacked_dataset
+  mean_len: 16384
+  std_len: 0
+  vocab_size: 100
+  max_sentence_len: 16384
+  seed: 0
+
+packed_sequence:
+  packed_sequence_size: 0
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+  shuffle: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 5.0e-5
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0

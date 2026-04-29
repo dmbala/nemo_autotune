@@ -1,0 +1,72 @@
+# Same as fsdp2_dp4 but demonstrates async DCP checkpointing + HF consolidation.
+# Uses the DCP staging path so training doesn't block on I/O.
+# Requires torch >= 2.9.0 (present in this container). If running on older torch,
+# is_async will be silently disabled and a plain (sync) save is used.
+
+step_scheduler:
+  global_batch_size: 64
+  local_batch_size: 4
+  ckpt_every_steps: 25      # frequent ckpts to exercise async
+  val_every_steps: 100
+  num_epochs: 1
+  max_steps: 100
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 10
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 1234
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.GPT2Config
+    vocab_size: 50258
+    n_positions: 1024
+    n_ctx: 1024
+    n_embd: 768
+    n_layer: 12
+    n_head: 12
+    bos_token_id: 50256
+    eos_token_id: 50256
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.nanogpt_dataset.NanogptDataset
+  file_pattern: PATH_OVERRIDE_train_bin
+  seq_len: 1024
+  shuffle_files: true
+  align_to_bos: false
+  bos_token: 50256
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  shuffle: false
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 3.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+  activation_checkpointing: true
+
+# Key knobs: is_async for non-blocking DCP save, save_consolidated for HF export.
+checkpoint:
+  enabled: true
+  checkpoint_dir: PATH_OVERRIDE_ckpt_dir
+  model_save_format: safetensors
+  save_consolidated: true
+  is_async: true

@@ -1,0 +1,70 @@
+# Step 4 of the scaling ladder: ~32B parameters.
+# World size: 1 node × 4 GPU.
+# New knob vs Step 3: tensor-parallel (tp_size=2) + sequence parallel.
+# 32B × bf16 ≈ 64 GB weights alone → FSDP2 sharding 4-way still gives 16 GB/rank for
+# weights, but the MLPs and attention activations don't shard in pure FSDP.
+# TP=2 shards the weight matrices themselves across TP ranks; SP shards the
+# activations between LayerNorm / dropout.
+# Layout: dp=2, tp=2 → 2 × 2 = 4 ranks total.
+
+seed: 1234
+
+benchmark:
+  warmup_steps: 5
+  peak_tflops: 989
+  nsys_start: -1
+  nsys_end: -1
+  nsys_ranks: []
+  num_nodes: 1
+
+step_scheduler:
+  global_batch_size: 8
+  local_batch_size: 1
+  ckpt_every_steps: 1000
+  val_every_steps: 1000
+  num_epochs: 1
+  max_steps: 30
+
+distributed:
+  strategy: fsdp2
+  dp_size: 2
+  tp_size: 2              # ← new
+  cp_size: 1
+  pp_size: 1
+  ep_size: 1
+  sequence_parallel: true # ← new, free memory savings with tp>1
+  activation_checkpointing: true
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 15
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.AutoConfig.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen2.5-32B
+
+checkpoint:
+  enabled: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+  fp32_upcast: false
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.mock_iterable_dataset.MockIterableDataset
+  seq_len: 2048
+  num_samples: 100000
+
+dataloader:
+  batch_size: null
+  _target_: torch.utils.data.DataLoader
+  num_workers: 0
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0

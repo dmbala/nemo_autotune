@@ -1,0 +1,76 @@
+# Module 08: kill-and-resume demo config.
+# Same tiny GPT-2 as Module 02, but with aggressive checkpointing and
+# checkpoint.restore_from: LATEST so any re-run from the same checkpoint_dir
+# picks up where the previous run died.
+
+step_scheduler:
+  global_batch_size: 32
+  local_batch_size: 32
+  ckpt_every_steps: 100     # frequent — maximize progress recovered after a crash
+  val_every_steps: 500
+  num_epochs: 1
+  # Long run so the kill_and_resume demo always interrupts mid-training
+  # (at ~25k tps on H100/H200 this tiny model takes ~30 s end-to-end).
+  max_steps: 5000
+
+dist_env:
+  backend: nccl
+  # Raise the init timeout so stalled collectives error cleanly instead of hanging forever.
+  timeout_minutes: 10
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 7
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.GPT2Config
+    vocab_size: 50258
+    n_positions: 256
+    n_ctx: 256
+    n_embd: 128
+    n_layer: 6
+    n_head: 4
+    bos_token_id: 50256
+    eos_token_id: 50256
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.nanogpt_dataset.NanogptDataset
+  file_pattern: PATH_OVERRIDE_train_bin
+  seq_len: 256
+  shuffle_files: true
+  align_to_bos: false
+  bos_token: 50256
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  shuffle: false
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 3.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: PATH_OVERRIDE_ckpt_dir
+  model_save_format: safetensors
+  save_consolidated: true
+  # This is the key knob. "LATEST" auto-follows the LATEST symlink that the
+  # recipe maintains (see /opt/Automodel/nemo_automodel/recipes/base_recipe.py:410).
+  # If no checkpoint exists yet, the recipe starts fresh.
+  restore_from: LATEST

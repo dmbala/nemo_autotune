@@ -1,0 +1,31 @@
+#!/bin/bash
+#SBATCH --job-name=ws10_longctx
+#SBATCH --partition=kempner_dev
+#SBATCH --account=kempner_dev
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:4
+#SBATCH --mem=256G
+#SBATCH --time=00:45:00
+#SBATCH --output=logs/%x.%j.out
+#SBATCH --error=logs/%x.%j.err
+
+# Run either the SP or CP variant. Override via env:
+#   MODE=sp  sbatch 10_long_context/long_ctx.slrm   # tp=2, SP on, 8k seq_len
+#   MODE=cp  sbatch 10_long_context/long_ctx.slrm   # cp=2, 16k seq_len
+
+set -euo pipefail
+mkdir -p logs
+
+WORKSHOP_ROOT="${WORKSHOP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${WORKSHOP_ROOT}/shared/slurm_common.sh"
+
+MODE="${MODE:-sp}"
+CFG="${WORKSHOP_ROOT}/10_long_context/configs/long_ctx_${MODE}.yaml"
+CKPT_DIR="${CKPT_ROOT}/longctx_${MODE}"
+
+"${WORKSHOP_ROOT}/04_finetune/finetune.sh" \
+    "${CFG}" \
+    "${CKPT_DIR}" \
+    --nproc-per-node=4

@@ -1,0 +1,78 @@
+# Module 16: tiny Mamba-2 pretrain on TinyShakespeare.
+# Demonstrates that Automodel's LLM recipe is architecture-agnostic: as long as the
+# model is a transformers.PreTrainedModel subclass with standard forward/labels
+# semantics, train_ft.py runs it unchanged. Mamba is a state-space model —
+# no attention, sub-quadratic in sequence length — but HF wraps it as a normal
+# PreTrainedModel, so it flows through the same recipe as Module 02's GPT-2.
+
+step_scheduler:
+  global_batch_size: 32
+  local_batch_size: 32
+  ckpt_every_steps: 200
+  val_every_steps: 500
+  num_epochs: 1
+  max_steps: 500
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 5
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 42
+  ranked: true
+
+# Tiny Mamba-2: 6 layers × hidden=128. Mamba2's SSM constraint requires
+# hidden_size * expand == num_heads * head_dim (128 * 2 == 8 * 32).
+# Note: causal_conv1d/selective_state_update CUDA kernels aren't installed in
+# this container build, so Mamba2 falls back to a slower pure-PyTorch path.
+# Throughput < transformer at the same size, but numerics are identical.
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.Mamba2Config
+    vocab_size: 50258
+    hidden_size: 128
+    num_hidden_layers: 6
+    num_heads: 8
+    head_dim: 32
+    expand: 2
+    n_groups: 1
+    state_size: 16
+    bos_token_id: 50256
+    eos_token_id: 50256
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.nanogpt_dataset.NanogptDataset
+  file_pattern: PATH_OVERRIDE_train_bin
+  seq_len: 256
+  shuffle_files: true
+  align_to_bos: false
+  bos_token: 50256
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  shuffle: false
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 3.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  sequence_parallel: false
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: PATH_OVERRIDE_ckpt_dir
+  model_save_format: safetensors
+  save_consolidated: true

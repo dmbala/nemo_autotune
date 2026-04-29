@@ -1,0 +1,89 @@
+# Step 5 of the scaling ladder: ~30B MoE.
+# World size: 1 node × 8 GPU (or 2 nodes × 4 GPU).
+# New knob vs Step 4: expert parallelism (ep_size).
+# MoE models replicate the router and shared-expert weights on every rank and
+# shard the expert FFNs across ep_size ranks. For Qwen3-MoE-30B with 128 experts,
+# ep=8 puts 16 experts per rank — a dramatic memory win over sharding the full
+# expert pool on every DP replica.
+#
+# Pattern adapted from /opt/Automodel/examples/benchmark/configs/qwen3_moe_30b_torch.yaml.
+
+seed: 1234
+
+benchmark:
+  warmup_steps: 10
+  peak_tflops: 989
+  nsys_start: -1
+  nsys_end: -1
+  nsys_ranks: []
+  num_nodes: 1
+
+step_scheduler:
+  global_batch_size: 256
+  local_batch_size: 4
+  ckpt_every_steps: 1000
+  val_every_steps: 1000
+  num_epochs: 1
+  max_steps: 30
+
+distributed:
+  strategy: fsdp2
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  ep_size: 8              # ← new — shard experts, not DP replicate them
+  sequence_parallel: false
+  activation_checkpointing: true
+
+  pipeline:
+    pp_schedule: interleaved1f1b
+    pp_microbatch_size: 2
+    round_virtual_stages_to_pp_multiple: down
+    scale_grads_in_schedule: false
+    patch_inner_model: false
+    patch_causal_lm_model: false
+    layers_per_stage: 2
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 10
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_config
+  config:
+    _target_: transformers.AutoConfig.from_pretrained
+    pretrained_model_name_or_path: Qwen/Qwen3-30B-A3B
+  trust_remote_code: true
+  backend:
+    _target_: nemo_automodel.components.models.common.BackendConfig
+    attn: sdpa
+    linear: torch
+    rms_norm: torch
+    experts: torch
+    dispatcher: torch
+    fake_balanced_gate: true
+    enable_hf_state_dict_adapter: false
+
+checkpoint:
+  enabled: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+  fp32_upcast: false
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.mock_iterable_dataset.MockIterableDataset
+  seq_len: 4096
+  num_samples: 100000
+
+dataloader:
+  batch_size: null
+  _target_: torch.utils.data.DataLoader
+  num_workers: 0
+
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
