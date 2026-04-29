@@ -1,0 +1,20 @@
+{
+  "ib": {
+    "hcas": [
+      {
+        "name": "mlx5_0",
+        "ports": [
+          {
+            "port": 1,
+            "counters": {
+              "port_xmit_data": 150,
+              "port_rcv_data": 275,
+              "symbol_error": 0,
+              "port_rcv_errors": 0
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

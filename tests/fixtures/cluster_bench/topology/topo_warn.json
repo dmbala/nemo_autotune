@@ -1,0 +1,5 @@
+{
+  "topology": {
+    "raw": "DEV GPU0 NIC0 CPU Affinity\nGPU0 X SYS 0-47\nNIC0 SYS X\n"
+  }
+}

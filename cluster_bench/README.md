@@ -21,6 +21,23 @@ Kempner-hardcoded (partition `kempner_dev`, storage paths under `/n/netscratch` 
 | 5 | MTTR + drift history (`trend.py`) | ✅ smoke-verified; regression flagging works against 7-day baseline |
 | 6 | `accept_node.slrm` end-to-end gate | ✅ composed 7-stage pipeline with PASS/WARN/FAIL verdict |
 
+## Local regression tests
+
+The analysis scripts and shell parsers now have a small fixture-based regression suite under
+[`tests/cluster_bench/`](../tests/cluster_bench/) with supporting fixtures in
+[`tests/fixtures/cluster_bench/`](../tests/fixtures/cluster_bench/). The current coverage focuses on:
+
+- `analysis/scrape_metrics.py` row extraction and idempotence
+- `analysis/correlate.py` verdict rendering on synthetic histories
+- `scripts/counter_delta.sh` clean vs error-counter deltas
+- `scripts/affinity_check.sh` `OK` / `WARN` / `FAIL` snapshot handling
+
+Run the suite from the repo root:
+
+```bash
+python3 -m unittest discover -s tests/cluster_bench -p 'test_*.py'
+```
+
 ## Stage 1 — static diagnostics (built)
 
 Three read-only probes. No GPU alloc needed, runs in seconds.

@@ -1,0 +1,6 @@
+{"kind":"training_benchmark","hostname":"nodeA","timestamp_utc":"2026-04-29T12:00:00Z","config":"compute_baseline","world_size":1,"mfu_percent":20.0,"tflops_per_gpu":70.0,"avg_iter_time_s":1.6}
+{"kind":"training_benchmark","hostname":"nodeB","timestamp_utc":"2026-04-29T12:00:00Z","config":"compute_baseline","world_size":1,"mfu_percent":60.0,"tflops_per_gpu":155.0,"avg_iter_time_s":0.75}
+{"kind":"nccl_perf","hostname":"nodeA","timestamp_utc":"2026-04-29T12:00:00Z","collective":"all_reduce","size_bytes":1073741824,"time_us":1200.0,"algbw_gbps":120.0,"busbw_gbps":80.0}
+{"kind":"nccl_perf","hostname":"nodeB","timestamp_utc":"2026-04-29T12:00:00Z","collective":"all_reduce","size_bytes":1073741824,"time_us":900.0,"algbw_gbps":220.0,"busbw_gbps":180.0}
+{"kind":"storage_save","hostname":"nodeA","timestamp_utc":"2026-04-29T12:00:00Z","tier":"tmp","num_saves":2,"mean_save_seconds":10.0,"total_bytes_written":3000000000,"throughput_gbps_estimate":1.0}
+{"kind":"storage_save","hostname":"nodeB","timestamp_utc":"2026-04-29T12:00:00Z","tier":"tmp","num_saves":2,"mean_save_seconds":2.0,"total_bytes_written":3000000000,"throughput_gbps_estimate":5.0}

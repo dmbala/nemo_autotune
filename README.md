@@ -44,6 +44,12 @@ Repurposes the workshop's benchmark recipe and distributed primitives as a clust
 
 Hardcoded for Kempner (`partition=kempner_dev`, `/n/netscratch` + `/n/holylfs06` paths, shared SIF). See [`cluster_bench/README.md`](cluster_bench/README.md) for thresholds, the results layout, and the correlator / report pipeline.
 
+`cluster_bench` also includes a small local regression suite under [`tests/cluster_bench/`](tests/cluster_bench/) for the parsers and analysis scripts. Run it with:
+
+```bash
+python3 -m unittest discover -s tests/cluster_bench -p 'test_*.py'
+```
+
 ## Start here
 
 - Workshop walkthrough: **[`basic_examples/README.md`](basic_examples/README.md)**
